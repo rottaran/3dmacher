@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=3D-Macher
+GenericName=3D Bilder fürs Handy erstellen
+GenericName[de]=3D Bilder fürs Handy erstellen
+Exec=3dmacher
+Terminal=false
+Type=Application
+StartupNotify=false
+Categories=Graphics
