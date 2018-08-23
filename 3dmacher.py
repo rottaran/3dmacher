@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 
 import sys
+from pprint import pprint
+import math
 from pathlib import Path
 from PyQt5.QtCore import (QObject, pyqtProperty, pyqtSignal, Qt,
     QRect, QPoint, QSize)
 from PyQt5.QtWidgets import (QWidget, QPushButton, QToolBar,
     QHBoxLayout, QVBoxLayout, QApplication, QMainWindow, QAction,
-    QCheckBox, QRadioButton)
+    QCheckBox, QRadioButton, QButtonGroup)
 from PyQt5.QtGui import (QPixmap, QImage, QImageReader,
     QPainter, QBrush, QIcon, QColor,
     QTransform)
@@ -71,6 +73,28 @@ class GlobalConfig(QObject):
         super().__init__(parent)
         self.left = ImageState(self)
         self.right = ImageState(self)
+        self._linked = True
+        self._mode = 0
+
+    linkedChanged = pyqtSignal(int)
+    @pyqtProperty(int)
+    def linked(self): return self._linked
+    @linked.setter
+    def linked(self, value):
+        old = self._linked
+        self._linked = value
+        if old != value: self.linkedChanged.emit(value)
+    def setLinked(self, value): self.linked = (value!=0)
+
+    modeChanged = pyqtSignal(int)
+    @pyqtProperty(int)
+    def mode(self): return self._mode
+    @mode.setter
+    def mode(self, value):
+        old = self._mode
+        self._mode = value
+        if old != value: self.modeChanged.emit(value)
+    def setMode(self, value): self.mode = value
 
     @pyqtProperty(QSize)
     def aspectRatio(self): return QSize(16,9)
@@ -160,21 +184,23 @@ class ImageView(QWidget):
 
     def paintEvent(self, event):
         dst = self.imgRect()
-
         qp = QPainter()
         qp.begin(self)
 
+        # draw background
         brush = QBrush(Qt.SolidPattern)
-        brush.setColor(Qt.white)
-        qp.setBrush(brush)
-        qp.drawRect(dst)
-
-        brush = QBrush(Qt.DiagCrossPattern)
+        # brush.setColor(Qt.white)
         brush.setColor(Qt.black)
         qp.setBrush(brush)
         qp.drawRect(dst)
+        # brush = QBrush(Qt.DiagCrossPattern)
+        # brush.setColor(Qt.black)
+        # qp.setBrush(brush)
+        # qp.drawRect(dst)
+
         self.state.paintImage(qp, dst)
 
+        # draw orientation lines
         qp.setPen(QColor(255,255,255,150))
         qp.drawLine(dst.x()+dst.width()/3,dst.y()+0,
             dst.x()+dst.width()/3,dst.y()+dst.height())
@@ -188,6 +214,7 @@ class ImageView(QWidget):
             dst.x()+dst.width(),dst.y()+dst.height()/2)
         qp.drawLine(dst.x()+0,dst.y()+dst.height()*2/3,
             dst.x()+dst.width(),dst.y()+dst.height()*2/3)
+
         qp.end()
 
 
@@ -203,23 +230,38 @@ class ImageWindow(QWidget):
         # buttons for global operations, modes
         save = QPushButton("Speichern")
         save.clicked.connect(self.saveTriggered)
+
+
         rotleft = QPushButton("Linkes drehen")
         rotleft.clicked.connect(self.config.leftState().rotate90)
         rotright = QPushButton("Rechtes drehen")
         rotright.clicked.connect(self.config.rightState().rotate90)
-        self.linkedBtn = QCheckBox("verbunden")
-        self.rotateBtn = QRadioButton("drehen+skalieren")
-        self.moveBtn = QRadioButton("schieben")
+
+        self._linkedBtn = QCheckBox("verbunden", self)
+        self._linkedBtn.setChecked(self.config.linked)
+        self._linkedBtn.stateChanged.connect(self.config.setLinked)
+        self.config.linkedChanged.connect(self.setLinked)
+
+        self._modeGroup = QButtonGroup(self)
+        self._modeGroup.addButton(QRadioButton("skalieren",self),0)
+        self._modeGroup.addButton(QRadioButton("schieben",self),1)
+        self._modeGroup.addButton(QRadioButton("drehen",self),2)
+        self._modeGroup.addButton(QRadioButton("drehen+skalieren",self),3)
+        self._modeGroup.button(self.config.mode).setChecked(True)
+        self._modeGroup.buttonClicked['int'].connect(self.config.setMode)
+        self.config.modeChanged.connect(self.setMode)
 
         tb = QHBoxLayout()
         tb.addWidget(save)
-        #tb.addWidget(rotleft)
-        #tb.addWidget(rotright)
-        tb.addWidget(self.linkedBtn)
-        tb.addWidget(self.rotateBtn)
-        tb.addWidget(self.moveBtn)
+        tb.addStretch(1)
+        tb.addWidget(rotleft)
+        tb.addWidget(rotright)
+        tb.addWidget(self._linkedBtn)
+        tb.addWidget(self._modeGroup.button(0))
+        tb.addWidget(self._modeGroup.button(1))
+        tb.addWidget(self._modeGroup.button(2))
+        tb.addWidget(self._modeGroup.button(3))
         vbox.addLayout(tb)
-        self.rotateBtn.setChecked(True)
 
         # the views to the left and right image
         self.leftImage = ImageView(self.config.leftState(), self.config, False)
@@ -239,13 +281,21 @@ class ImageWindow(QWidget):
         self.rightImage.mousePress.connect(self.mousePressR)
         self.rightImage.mouseMove.connect(self.mouseMove)
 
-    def computeRotateScale(self, start, end):
+    def setLinked(self, value):
+        self._linkedBtn.setChecked(value!=0)
+        self._linkedBtn.repaint()
+
+    def setMode(self, value):
+        self.config.setLinked(value==0)
+        self._modeGroup.button(value).setChecked(True)
+
+    def computeScale(self, start, end):
         try:
             p1 = start - self._mouseCenter
             p2 = end - self._mouseCenter
-            s = float(p1.y()*p2.x()-p1.x()*p2.y())/float(p1.x()*p1.x()+p1.y()*p1.y())
-            c = (p2.y()+p1.x()*s)/p1.y()
-            return QTransform(c,-s,s,c,0,0)
+            s = math.sqrt(float(p2.x()*p2.x()+p2.y()*p2.y())/
+                float(p1.x()*p1.x()+p1.y()*p1.y()))
+            return QTransform().scale(s,s)
         except ZeroDivisionError:
             return QTransform()
 
@@ -253,6 +303,24 @@ class ImageWindow(QWidget):
         try:
             m = end-start
             return QTransform(1,0,0,1,m.x(),m.y())
+        except ZeroDivisionError:
+            return QTransform()
+
+    def computeRotate(self, start, end):
+        try:
+            p1 = start - self._mouseCenter
+            p2 = end - self._mouseCenter
+            return QTransform().rotateRadians(math.atan2(p1.x(),p1.y()) - math.atan2(p2.x(),p2.y()))
+        except ZeroDivisionError:
+            return QTransform()
+
+    def computeRotateScale(self, start, end):
+        try:
+            p1 = start - self._mouseCenter
+            p2 = end - self._mouseCenter
+            s = float(p1.y()*p2.x()-p1.x()*p2.y())/float(p1.x()*p1.x()+p1.y()*p1.y())
+            c = (p2.y()+p1.x()*s)/p1.y()
+            return QTransform(c,-s,s,c,0,0)
         except ZeroDivisionError:
             return QTransform()
 
@@ -272,13 +340,19 @@ class ImageWindow(QWidget):
 
     def mouseMove(self, m):
         self._mouseEnd = m.pos()
-        if self.rotateBtn.isChecked():
-            transform = self.computeRotateScale(self._mouseStart, self._mouseEnd)
-        elif self.moveBtn.isChecked():
+
+        if self.config.mode == 0:
+            transform = self.computeScale(self._mouseStart, self._mouseEnd)
+        elif self.config.mode == 1:
             transform = self.computeMove(self._mouseStart, self._mouseEnd)
-        if (self._mouseSide==0 or self.linkedBtn.isChecked()):
+        elif self.config.mode == 2:
+            transform = self.computeRotate(self._mouseStart, self._mouseEnd)
+        elif self.config.mode == 3:
+            transform = self.computeRotateScale(self._mouseStart, self._mouseEnd)
+
+        if (self._mouseSide==0 or self.config.linked):
             self.config.leftState().transform = self._leftTransform * transform
-        if (self._mouseSide==1 or self.linkedBtn.isChecked()):
+        if (self._mouseSide==1 or self.config.linked):
             self.config.rightState().transform = self._rightTransform * transform
 
 
