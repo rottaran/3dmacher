@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from PyQt5.QtCore import (QObject, pyqtProperty, pyqtSignal, Qt,
     QRect, QPoint, QSize, QThread, QMutex, QWaitCondition, QMutexLocker,
-    QBuffer)
+    QBuffer, QPointF)
 from PyQt5.QtWidgets import (QWidget, QPushButton, QToolBar,
     QHBoxLayout, QVBoxLayout, QApplication, QMainWindow, QAction,
     QCheckBox, QRadioButton, QButtonGroup)
@@ -69,8 +69,9 @@ class ImageState(QObject):
         qp.save()
         qp.setClipRect(dst)
         qp.translate(dst.x()+dst.width()/2, dst.y()+dst.height()/2)
+        qp.scale(dst.width(), dst.width())
         qp.setTransform(self.transform, True) # combine with image's transform
-        qp.scale(dst.width()/self.image.width(), dst.width()/self.image.width())
+        qp.scale(1.0/self.image.width(), 1.0/self.image.width())
         qp.translate(-self.image.width()/2, -self.image.height()/2)
         qp.drawImage(0,0, self.image)
         qp.restore()
@@ -369,7 +370,7 @@ class ImageWindow(QWidget):
 
     def computeMove(self, start, end):
         try:
-            m = end-start
+            m = QPointF(end-start)/self.leftImage.imgRect().width()
             return QTransform(1,0,0,1,m.x(),m.y())
         except ZeroDivisionError:
             return QTransform()
@@ -476,6 +477,7 @@ class DepthRenderThread(QThread):
         print("updating depth map")
 
         tmp = self.image.copy()
+        tmp.fill(Qt.black)
         qp = QPainter(tmp)
         self.left.paintImage(qp, QRect(QPoint(0,0), tmp.size()))
         qp.end()
@@ -492,21 +494,27 @@ class DepthRenderThread(QThread):
 
         print("begin detection...")
 
-        window_size = 3
-        min_disp = 16
-        num_disp = 112-min_disp
-        stereo = cv2.StereoSGBM.create(
-            minDisparity = min_disp,
-            numDisparities = num_disp,
-            blockSize = window_size,
-            uniquenessRatio = 10,
-            speckleWindowSize = 100,
-            speckleRange = 32,
-            disp12MaxDiff = 1,
-            P1 = 8*3*window_size**2,
-            P2 = 32*3*window_size**2
-            )
-        im = ((stereo.compute(left, right)/2048)*256).astype(np.uint8)
+        stereo = cv2.StereoBM.create(numDisparities=16, blockSize=15)
+
+        # window_size = 3
+        # min_disp = 16
+        # num_disp = 112-min_disp
+        # stereo = cv2.StereoSGBM.create(
+        #     minDisparity = min_disp,
+        #     numDisparities = num_disp,
+        #     blockSize = window_size,
+        #     uniquenessRatio = 10,
+        #     speckleWindowSize = 100,
+        #     speckleRange = 32,
+        #     disp12MaxDiff = 1,
+        #     P1 = 8*3*window_size**2,
+        #     P2 = 32*3*window_size**2
+        #     )
+
+        #im = right
+        im = stereo.compute(left, right)
+        #pprint(im)
+        im = (im/16).astype(np.uint8)
         print("convert result to QImage")
 
         # consider post processing: https://docs.opencv.org/3.1.0/d3/d14/tutorial_ximgproc_disparity_filtering.html
