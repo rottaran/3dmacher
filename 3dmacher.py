@@ -6,13 +6,16 @@ from pprint import pprint
 import math
 from pathlib import Path
 from PyQt5.QtCore import (QObject, pyqtProperty, pyqtSignal, Qt,
-    QRect, QPoint, QSize)
+    QRect, QPoint, QSize, QThread, QMutex, QWaitCondition, QMutexLocker)
 from PyQt5.QtWidgets import (QWidget, QPushButton, QToolBar,
     QHBoxLayout, QVBoxLayout, QApplication, QMainWindow, QAction,
     QCheckBox, QRadioButton, QButtonGroup)
 from PyQt5.QtGui import (QPixmap, QImage, QImageReader,
     QPainter, QBrush, QIcon, QColor,
     QTransform)
+
+import cv2
+import numpy as np
 
 class ImageState(QObject):
     changed = pyqtSignal()
@@ -362,7 +365,7 @@ class ImageWindow(QWidget):
         print("saving in "+dstFile)
 
         # create an image for the final output
-        img = QImage(self.config.saveSize, QImage.Format_RGB32)
+        img = QImage(self.config.saveSize, QImage.Format_Grayscale8)
         qp = QPainter(img)
 
         # black background and then the images
@@ -377,11 +380,175 @@ class ImageWindow(QWidget):
         img.save(dstFile)
 
 
+class DepthRenderThread(QThread):
+    renderedImage = pyqtSignal()
+    def __init__(self, w,h, l,r, parent=None):
+        super(DepthRenderThread, self).__init__(parent)
+        self.mutex = QMutex()
+        self.condition = QWaitCondition()
+        self.left = l
+        self.right = r
+        self.image = QImage(w, h, QImage.Format_Grayscale8)
+        self.restart = False
+        self.abort = False
+
+    def __del__(self):
+        self.mutex.lock()
+        self.abort = True
+        self.condition.wakeOne()
+        self.mutex.unlock()
+        self.wait()
+
+    def updateImage(self):
+        locker = QMutexLocker(self.mutex)
+        if not self.isRunning():
+            self.start(QThread.LowPriority)
+        else:
+            self.restart = True
+            self.condition.wakeOne()
+
+    def _updateImage(self):
+        print("updating depth map")
+
+        tmp = self.image.copy()
+        qp = QPainter(tmp)
+        self.left.paintImage(qp, QRect(QPoint(0,0), tmp.size()))
+        qp.end()
+        ptr = tmp.constBits()
+        ptr.setsize(tmp.byteCount())
+        left = np.array(ptr).reshape( tmp.height(), tmp.width(), 1)
+
+        qp = QPainter(tmp)
+        self.right.paintImage(qp, QRect(QPoint(0,0), tmp.size()))
+        qp.end()
+        ptr = tmp.constBits()
+        ptr.setsize(tmp.byteCount())
+        right = np.array(ptr).reshape( tmp.height(), tmp.width(), 1)
+
+        window_size = 3
+        min_disp = 16
+        num_disp = 112-min_disp
+        stereo = cv2.StereoSGBM.create(
+            minDisparity = min_disp,
+            numDisparities = num_disp,
+            blockSize = window_size,
+            uniquenessRatio = 10,
+            speckleWindowSize = 100,
+            speckleRange = 32,
+            disp12MaxDiff = 1,
+            P1 = 8*3*window_size**2,
+            P2 = 32*3*window_size**2
+            )
+
+        # # morphology settings
+        # kernel = np.ones((12,12),np.uint8)
+
+        # returns int16
+        im = ((stereo.compute(left, right)/2048)*256).astype(np.uint8)
+        self.mutex.lock()
+        self.image = QImage(im.data, im.shape[1], im.shape[0], im.strides[0],
+            QImage.Format_Grayscale8).copy()
+        self.mutex.unlock()
+        print("3d final image size "+str(self.image.width())+"x"+str(self.image.height()))
+
+
+    def run(self):
+        while not self.abort:
+            self._updateImage()
+            self.renderedImage.emit()
+
+            self.mutex.lock()
+            if not self.restart:
+                self.condition.wait(self.mutex)
+            self.restart = False
+            self.mutex.unlock()
+
+
+class DepthWindow(QWidget):
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.setWindowTitle('3D Tiefenkarte')
+
+        self.setMinimumSize(self.config.aspectRatio.width()*5/2,
+            self.config.aspectRatio.height()*5)
+        self.setMaximumSize(self.config.aspectRatio.width()*50/2,
+            self.config.aspectRatio.height()*50)
+
+        aw = self.config.aspectRatio.width()
+        ah = self.config.aspectRatio.height()
+        self.thread = DepthRenderThread(aw*200/2, ah*200,
+            self.config.leftState(), self.config.rightState(), self)
+        self.thread.renderedImage.connect(self.repaint)
+
+        self.config.leftState().changed.connect(self.thread.updateImage)
+        self.config.rightState().changed.connect(self.thread.updateImage)
+
+
+    def sizeHint(self):
+        return QSize(self.config.aspectRatio.width()*39/2,
+            self.config.aspectRatio.height()*30)
+
+    def imgRect(self):
+        aw = self.config.aspectRatio.width()
+        ah = self.config.aspectRatio.height()*2
+        if self.width() > aw*self.height()/ah:
+            w = aw*self.height()/ah
+            h = self.height()
+        else:
+            w = self.width()
+            h = ah*self.width()/aw
+        # print("3d depth size "+str(w)+"x"+str(h))
+        return QRect((self.width()-w)/2,(self.height()-h)/2,w,h)
+
+    def paintEvent(self, event):
+        locker = QMutexLocker(self.thread.mutex)
+        img = self.thread.image
+
+        dst = self.imgRect()
+        qp = QPainter()
+        qp.begin(self)
+
+        # draw background
+        brush = QBrush(Qt.SolidPattern)
+        # brush.setColor(Qt.white)
+        brush.setColor(Qt.black)
+        qp.setBrush(brush)
+        qp.drawRect(QRect(0,0,self.width(),self.height()))
+
+        qp.save()
+        qp.translate(dst.x()+dst.width()/2, dst.y()+dst.height()/2)
+        qp.scale(dst.width()/img.width(), dst.width()/img.width())
+        qp.translate(-img.width()/2, -img.height()/2)
+        qp.drawImage(0,0,img)
+        qp.restore()
+
+        # draw orientation lines
+        qp.setPen(QColor(255,255,255,150))
+        qp.drawLine(dst.x()+dst.width()/3,dst.y()+0,
+            dst.x()+dst.width()/3,dst.y()+dst.height())
+        qp.drawLine(dst.x()+dst.width()/2,dst.y()+0,
+            dst.x()+dst.width()/2,dst.y()+dst.height())
+        qp.drawLine(dst.x()+dst.width()*2/3,dst.y()+0,
+            dst.x()+dst.width()*2/3,dst.y()+dst.height())
+        qp.drawLine(dst.x()+0,dst.y()+dst.height()/3,
+            dst.x()+dst.width(),dst.y()+dst.height()/3)
+        qp.drawLine(dst.x()+0,dst.y()+dst.height()/2,
+            dst.x()+dst.width(),dst.y()+dst.height()/2)
+        qp.drawLine(dst.x()+0,dst.y()+dst.height()*2/3,
+            dst.x()+dst.width(),dst.y()+dst.height()*2/3)
+
+        qp.end()
+
+
+
 if __name__ == '__main__':
 
     app = QApplication(sys.argv)
     config = GlobalConfig()
     iw = ImageWindow(config)
     iw.show()
+    dp = DepthWindow(config)
+    dp.show()
 
     sys.exit(app.exec_())
