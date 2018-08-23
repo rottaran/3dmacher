@@ -1,0 +1,51 @@
+<html>
+<head>
+  <title>3D VR viewer</title>
+  <script type="text/javascript" src="jquery-3.3.1.min.js"></script>
+  <script type="text/javascript" src="jquery.fullscreen.min.js"></script>
+
+  <script>
+
+$(function() {
+  $('.fs').click(function() {
+    if ($('body').hasClass("fs-active")) {
+      $.fullscreen.exit()
+    } else {
+      $('body').fullscreen();
+    }
+    $('body').toggleClass("fs-active")
+    return false;
+  })
+});
+
+$(function() {
+  function reloadImage() {
+    var url = "img.jpg?rnd="+Math.random();
+    $('#theimage').attr("src",url);
+  }
+  setInterval(reloadImage, 500);
+});
+  </script>
+
+  <style>
+body, html {
+    height: 100%;
+}
+
+img {
+    max-width: 100%;
+    max-height: 100%;
+}
+
+.landscape{
+  width: 100%;
+}
+
+  </style>
+</head>
+<body>
+  <div class="landscape">
+    <img src="img.jpg" class="fs" id="theimage"/>
+  </div>
+</body>
+</html>

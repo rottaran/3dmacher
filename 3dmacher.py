@@ -6,7 +6,8 @@ from pprint import pprint
 import math
 from pathlib import Path
 from PyQt5.QtCore import (QObject, pyqtProperty, pyqtSignal, Qt,
-    QRect, QPoint, QSize, QThread, QMutex, QWaitCondition, QMutexLocker)
+    QRect, QPoint, QSize, QThread, QMutex, QWaitCondition, QMutexLocker,
+    QBuffer)
 from PyQt5.QtWidgets import (QWidget, QPushButton, QToolBar,
     QHBoxLayout, QVBoxLayout, QApplication, QMainWindow, QAction,
     QCheckBox, QRadioButton, QButtonGroup)
@@ -16,6 +17,11 @@ from PyQt5.QtGui import (QPixmap, QImage, QImageReader,
 
 import cv2
 import numpy as np
+
+import os
+import shutil
+import threading
+from http.server import (ThreadingHTTPServer, BaseHTTPRequestHandler)
 
 class ImageState(QObject):
     changed = pyqtSignal()
@@ -221,6 +227,56 @@ class ImageView(QWidget):
         qp.end()
 
 
+class ImageWebserver(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/":
+            self.serveFile("index.html", "text/html; charset=utf-8")
+        elif self.path == "/jquery-3.3.1.min.js":
+            self.serveFile("jquery-3.3.1.min.js", "text/plain; charset=utf-8")
+        elif self.path == "/jquery.fullscreen.min.js":
+            self.serveFile("jquery.fullscreen.min.js", "text/plain; charset=utf-8")
+        elif self.path.startswith("/img.jpg?"):
+            self.serveImage()
+        else:
+            self.send_response(404)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            self.wfile.write("<html><head><title>no file</title></head>".encode('utf-8'))
+            self.wfile.write("<body><p>Wrong address</p>".encode('utf-8'))
+            self.wfile.write(("<p>You accessed path: %s</p>" % self.path).encode('utf-8'))
+            self.wfile.write("</body></html>".encode('utf-8'))
+
+    def serveFile(self, file, ctype):
+        self.send_response(200)
+        self.send_header("Content-type", ctype)
+        self.end_headers()
+        source = open(Path(sys.argv[0]).parent.joinpath(file), 'rb')
+        shutil.copyfileobj(source, self.wfile)
+
+    def serveImage(self):
+        self.send_response(200)
+        self.send_header("Content-type", "image/jpeg")
+        self.end_headers()
+
+        cfg = self.server.appconfig
+        # create an image for the final output
+        img = QImage(cfg.saveSize, QImage.Format_RGB888)
+        qp = QPainter(img)
+        # black background and then the images
+        dst = QRect(0,0,img.width(), img.height())
+        brush = QBrush(Qt.SolidPattern)
+        brush.setColor(Qt.black)
+        qp.setBrush(brush)
+        qp.drawRect(dst)
+        cfg.paintImage(qp, dst)
+        qp.end()
+
+        buffer = QBuffer()
+        buffer.open(QBuffer.ReadWrite)
+        img.save(buffer, "JPG")
+        self.wfile.write(buffer.data())
+
+
 class ImageWindow(QWidget):
     def __init__(self, config, parent=None):
         super().__init__(parent)
@@ -233,7 +289,6 @@ class ImageWindow(QWidget):
         # buttons for global operations, modes
         save = QPushButton("Speichern")
         save.clicked.connect(self.saveTriggered)
-
 
         rotleft = QPushButton("Linkes drehen")
         rotleft.clicked.connect(self.config.leftState().rotate90)
@@ -283,6 +338,16 @@ class ImageWindow(QWidget):
         self.leftImage.mouseMove.connect(self.mouseMove)
         self.rightImage.mousePress.connect(self.mousePressR)
         self.rightImage.mouseMove.connect(self.mouseMove)
+
+        self.httpd = ThreadingHTTPServer(('', 12345), ImageWebserver)
+        self.httpd.appconfig = self.config
+        self.httpd_thread = threading.Thread(target=self.httpd.serve_forever)
+        self.httpd_thread.daemon = True
+        self.httpd_thread.start()
+
+    def closeEvent(self, e):
+        self.httpd.shutdown()
+        self.httpd.server_close()
 
     def setLinked(self, value):
         self._linkedBtn.setChecked(value!=0)
@@ -365,7 +430,7 @@ class ImageWindow(QWidget):
         print("saving in "+dstFile)
 
         # create an image for the final output
-        img = QImage(self.config.saveSize, QImage.Format_Grayscale8)
+        img = QImage(self.config.saveSize, QImage.Format_RGB888)
         qp = QPainter(img)
 
         # black background and then the images
@@ -425,6 +490,8 @@ class DepthRenderThread(QThread):
         ptr.setsize(tmp.byteCount())
         right = np.array(ptr).reshape( tmp.height(), tmp.width(), 1)
 
+        print("begin detection...")
+
         window_size = 3
         min_disp = 16
         num_disp = 112-min_disp
@@ -439,12 +506,11 @@ class DepthRenderThread(QThread):
             P1 = 8*3*window_size**2,
             P2 = 32*3*window_size**2
             )
-
-        # # morphology settings
-        # kernel = np.ones((12,12),np.uint8)
-
-        # returns int16
         im = ((stereo.compute(left, right)/2048)*256).astype(np.uint8)
+        print("convert result to QImage")
+
+        # consider post processing: https://docs.opencv.org/3.1.0/d3/d14/tutorial_ximgproc_disparity_filtering.html
+
         self.mutex.lock()
         self.image = QImage(im.data, im.shape[1], im.shape[0], im.strides[0],
             QImage.Format_Grayscale8).copy()
@@ -539,7 +605,6 @@ class DepthWindow(QWidget):
             dst.x()+dst.width(),dst.y()+dst.height()*2/3)
 
         qp.end()
-
 
 
 if __name__ == '__main__':
